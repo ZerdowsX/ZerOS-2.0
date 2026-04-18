@@ -15,6 +15,8 @@
 
 static volatile uint16_t* const vga = (uint16_t*)VGA_ADDRESS;
 
+static int32_t cursor_x = 10;
+static int32_t cursor_y = 8;
 static int cursor_x = 10;
 static int cursor_y = 8;
 
@@ -74,11 +76,30 @@ static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
     if (size < 4) return info;
     if (!(data[0] == 0xFF && data[1] == 0xD8)) return info;
 
+
+static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
+    struct jpeg_info info = {0, 0, 0};
+    if (size < 4) return info;
+    if (!(data[0] == 0xFF && data[1] == 0xD8)) return info;
+
     size_t i = 2;
     while (i + 8 < size) {
         if (data[i] != 0xFF) {
             ++i;
             continue;
+        }
+
+        uint8_t marker = data[i + 1];
+        if (marker == 0xD9) break;
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            i += 2;
+            continue;
+        }
+
+        if (i + 3 >= size) break;
+        uint16_t seg_len = (uint16_t)((data[i + 2] << 8) | data[i + 3]);
+        if (seg_len < 2 || i + 2 + seg_len > size) break;
+
         }
 
         uint8_t marker = data[i + 1];
@@ -154,6 +175,17 @@ static char wait_keypress(void) {
 static void draw_testpaint_texture(void) {
     struct jpeg_info info = decode_jpeg_header(testpaint, sizeof(testpaint));
 
+    const int32_t start_x = 48;
+    const int32_t start_y = 6;
+    const int32_t w = 16;
+    const int32_t h = 16;
+
+    uint8_t ok_color = COLOR(15, 1);
+    uint8_t fail_color = COLOR(15, 4);
+
+    for (int32_t y = 0; y < h; ++y) {
+        for (int32_t x = 0; x < w; ++x) {
+
     const int start_x = 48;
     const int start_y = 6;
     const int w = 16;
@@ -211,6 +243,23 @@ static void draw_cursor(void) {
         {1, 1, 0},
         {1, 1, 1}
     };
+
+    for (int32_t y = 0; y < 3; ++y) {
+        for (int32_t x = 0; x < 3; ++x) {
+            if (!mask[y][x]) continue;
+            int px = cursor_x + x;
+            int py = cursor_y + y;
+            if (px < 0 || py < 0 || px >= VGA_WIDTH || py >= VGA_HEIGHT) continue;
+            draw_cell((size_t)px, (size_t)py, 0xDB, COLOR(0, 15));
+        }
+    }
+}
+
+static void render(void) {
+    draw_desktop();
+    draw_cursor();
+}
+
 
     for (int y = 0; y < 3; ++y) {
         for (int x = 0; x < 3; ++x) {
@@ -294,6 +343,8 @@ static void handle_mouse_byte(uint8_t b) {
     if (mouse_cycle < 3) return;
     mouse_cycle = 0;
 
+    int32_t dx = (int8_t)mouse_packet[1];
+    int32_t dy = (int8_t)mouse_packet[2];
     int dx = (int8_t)mouse_packet[1];
     int dy = (int8_t)mouse_packet[2];
 
@@ -301,6 +352,12 @@ static void handle_mouse_byte(uint8_t b) {
     cursor_y -= dy;
     clamp_cursor();
 }
+
+static void process_input(void) {
+    while (inb(PORT_PS2_STATUS) & 0x01) {
+        uint8_t status = inb(PORT_PS2_STATUS);
+        uint8_t data = inb(PORT_PS2_DATA);
+
 
 static void process_input(void) {
     while (inb(PORT_PS2_STATUS) & 0x01) {
