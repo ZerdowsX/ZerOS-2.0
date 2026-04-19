@@ -8,6 +8,8 @@
 #define PORT_PS2_DATA 0x60
 #define PORT_PS2_STATUS 0x64
 #define PORT_PS2_CMD 0x64
+#define PORT_KEYBOARD_DATA 0x60
+#define PORT_KEYBOARD_STATUS 0x64
 
 #define COLOR(fg, bg) (uint8_t)(((bg) << 4) | ((fg) & 0x0F))
 
@@ -18,6 +20,12 @@ static int32_t cursor_y = 8;
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet[3];
 
+static int cursor_x = 10;
+static int cursor_y = 8;
+
+static uint8_t mouse_cycle = 0;
+static uint8_t mouse_packet[3];
+
 struct jpeg_info {
     uint16_t width;
     uint16_t height;
@@ -25,12 +33,15 @@ struct jpeg_info {
 };
 
 // testpaint (128x128 jpeg) placeholder blob with SOI/EOI and SOF0 size fields.
+// testpaint (128x128 jpeg) placeholder blob with valid SOI/EOI and SOF0 size fields.
 static const uint8_t testpaint[] = {
     0xFF, 0xD8,
     0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
     0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x80, 0x00, 0x80, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
     0xFF, 0xD9
 };
+static size_t cursor_x = 10;
+static size_t cursor_y = 8;
 
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
@@ -44,6 +55,11 @@ static inline void outb(uint16_t port, uint8_t value) {
 
 static void io_wait(void) {
     outb(0x80, 0);
+}
+
+static void draw_cell(size_t x, size_t y, char ch, uint8_t color) {
+    if (x >= VGA_WIDTH || y >= VGA_HEIGHT) return;
+    vga[y * VGA_WIDTH + x] = ((uint16_t)color << 8) | (uint8_t)ch;
 }
 
 static void draw_cell(size_t x, size_t y, char ch, uint8_t color) {
@@ -65,6 +81,12 @@ static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
     if (size < 4) return info;
     if (!(data[0] == 0xFF && data[1] == 0xD8)) return info;
 
+
+static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
+    struct jpeg_info info = {0, 0, 0};
+    if (size < 4) return info;
+    if (!(data[0] == 0xFF && data[1] == 0xD8)) return info;
+
     size_t i = 2;
     while (i + 8 < size) {
         if (data[i] != 0xFF) {
@@ -82,8 +104,72 @@ static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
 
         if (i + 3 >= size) break;
 
+        uint8_t marker = data[i + 1];
+        if (marker == 0xD9) break;
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            i += 2;
+            continue;
+        }
+
+        if (i + 3 >= size) break;
+        uint16_t seg_len = (uint16_t)((data[i + 2] << 8) | data[i + 3]);
+        if (seg_len < 2 || i + 2 + seg_len > size) break;
+
+        }
+
+        uint8_t marker = data[i + 1];
+        if (marker == 0xD9) break;
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            i += 2;
+            continue;
+static void draw_desktop(void) {
+    const uint8_t desktop_color = COLOR(15, 4); // white on red
+
+    for (size_t y = 0; y < VGA_HEIGHT; ++y) {
+        for (size_t x = 0; x < VGA_WIDTH; ++x) {
+            draw_cell(x, y, ' ', desktop_color);
+        }
+    }
+
+    // Blue test texture: filled square
+    const uint8_t texture_color = COLOR(15, 1); // white on blue
+    for (size_t y = 6; y < 14; ++y) {
+        for (size_t x = 30; x < 46; ++x) {
+            draw_cell(x, y, ' ', texture_color);
+        }
+    }
+
+    draw_text(2, 1, "ZerDOS GUI shell test", COLOR(15, 4));
+    draw_text(2, 3, "Move cursor: W/A/S/D", COLOR(14, 4));
+}
+
+static void draw_cursor(void) {
+    // Cursor as bright block
+    draw_cell(cursor_x, cursor_y, 'X', COLOR(0, 15));
+}
+
+static void render(void) {
+    draw_desktop();
+    draw_cursor();
+}
+
+static char scancode_to_ascii(uint8_t sc) {
+    static const char map[128] = {
+        [0x1E] = 'a', [0x11] = 'w', [0x1F] = 's', [0x20] = 'd',
+        [0x10] = 'q'
+    };
+
         uint16_t seg_len = (uint16_t)((data[i + 2] << 8) | data[i + 3]);
         if (seg_len < 2 || (i + 2 + seg_len) > size) break;
+
+static char wait_keypress(void) {
+    while (1) {
+        while ((inb(PORT_KEYBOARD_STATUS) & 1) == 0) {
+        }
+
+        if (i + 3 >= size) break;
+        uint16_t seg_len = (uint16_t)((data[i + 2] << 8) | data[i + 3]);
+        if (seg_len < 2 || i + 2 + seg_len > size) break;
 
         if (marker == 0xC0 || marker == 0xC2) {
             if (seg_len >= 7) {
@@ -113,6 +199,29 @@ static void draw_testpaint_texture(void) {
 
     for (int32_t y = 0; y < h; ++y) {
         for (int32_t x = 0; x < w; ++x) {
+
+    const int32_t start_x = 48;
+    const int32_t start_y = 6;
+    const int32_t w = 16;
+    const int32_t h = 16;
+
+    uint8_t ok_color = COLOR(15, 1);
+    uint8_t fail_color = COLOR(15, 4);
+
+    for (int32_t y = 0; y < h; ++y) {
+        for (int32_t x = 0; x < w; ++x) {
+
+    const int start_x = 48;
+    const int start_y = 6;
+    const int w = 16;
+    const int h = 16;
+
+    uint8_t ok_color = COLOR(15, 1);
+    uint8_t fail_color = COLOR(15, 4);
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            // Checker pattern as visual placeholder for JPEG output.
             uint8_t c = ((x + y) & 1) ? ok_color : COLOR(14, 9);
             if (!info.valid || info.width != 128 || info.height != 128) {
                 c = fail_color;
@@ -122,6 +231,7 @@ static void draw_testpaint_texture(void) {
     }
 
     if (info.valid && info.width == 128 && info.height == 128) {
+    if (info.valid) {
         draw_text(44, 4, "testpaint JPEG 128x128", COLOR(15, 4));
     } else {
         draw_text(44, 4, "testpaint JPEG decode FAIL", COLOR(15, 4));
@@ -166,6 +276,63 @@ static void draw_cursor(void) {
             int32_t py = cursor_y + y;
             if (px < 0 || py < 0 || px >= VGA_WIDTH || py >= VGA_HEIGHT) continue;
             draw_cell((size_t)px, (size_t)py, (char)0xDB, COLOR(0, 15));
+
+static void draw_desktop(void) {
+    const uint8_t desktop_color = COLOR(15, 4);
+
+    for (size_t y = 0; y < VGA_HEIGHT; ++y) {
+        for (size_t x = 0; x < VGA_WIDTH; ++x) {
+            draw_cell(x, y, ' ', desktop_color);
+        }
+    }
+
+    // Original blue test square.
+    const uint8_t texture_color = COLOR(15, 1);
+    for (size_t y = 6; y < 14; ++y) {
+        for (size_t x = 28; x < 40; ++x) {
+            draw_cell(x, y, ' ', texture_color);
+        }
+    }
+
+    draw_text(2, 1, "ZerDOS GUI shell test", COLOR(15, 4));
+    draw_text(2, 3, "Mouse: move cursor | W/A/S/D also works", COLOR(14, 4));
+    draw_text(2, 4, "Q = reset cursor", COLOR(14, 4));
+
+    draw_testpaint_texture();
+}
+
+static void draw_cursor(void) {
+    // 3x3 textured cursor (arrow-like footprint)
+    static const uint8_t mask[3][3] = {
+        {1, 0, 0},
+        {1, 1, 0},
+        {1, 1, 1}
+    };
+
+    for (int32_t y = 0; y < 3; ++y) {
+        for (int32_t x = 0; x < 3; ++x) {
+            if (!mask[y][x]) continue;
+            int px = cursor_x + x;
+            int py = cursor_y + y;
+            if (px < 0 || py < 0 || px >= VGA_WIDTH || py >= VGA_HEIGHT) continue;
+            draw_cell((size_t)px, (size_t)py, 0xDB, COLOR(0, 15));
+        }
+    }
+}
+
+static void render(void) {
+    draw_desktop();
+    draw_cursor();
+}
+
+
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            if (!mask[y][x]) continue;
+            int px = cursor_x + x;
+            int py = cursor_y + y;
+            if (px < 0 || py < 0 || px >= VGA_WIDTH || py >= VGA_HEIGHT) continue;
+            draw_cell((size_t)px, (size_t)py, 0xDB, COLOR(0, 15));
         }
     }
 }
@@ -190,6 +357,8 @@ static void clamp_cursor(void) {
     if (cursor_y < 0) cursor_y = 0;
     if (cursor_x > (VGA_WIDTH - 3)) cursor_x = (VGA_WIDTH - 3);
     if (cursor_y > (VGA_HEIGHT - 3)) cursor_y = (VGA_HEIGHT - 3);
+    if (cursor_x > VGA_WIDTH - 3) cursor_x = VGA_WIDTH - 3;
+    if (cursor_y > VGA_HEIGHT - 3) cursor_y = VGA_HEIGHT - 3;
 }
 
 static void ps2_wait_write_ready(void) {
@@ -223,6 +392,21 @@ static void init_mouse(void) {
     ps2_wait_write_ready();
     outb(PORT_PS2_DATA, status);
 
+    // Enable auxiliary device
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0xA8);
+
+    // Enable mouse IRQ in controller command byte
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0x20);
+    uint8_t status = mouse_read();
+    status |= 0x02;
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0x60);
+    ps2_wait_write_ready();
+    outb(PORT_PS2_DATA, status);
+
+    // Set defaults + enable streaming
     mouse_write(0xF6);
     (void)mouse_read();
     mouse_write(0xF4);
@@ -246,6 +430,27 @@ static void handle_mouse_byte(uint8_t b) {
     clamp_cursor();
 }
 
+
+    mouse_packet[mouse_cycle++] = b;
+    if (mouse_cycle < 3) return;
+    mouse_cycle = 0;
+
+    int32_t dx = (int8_t)mouse_packet[1];
+    int32_t dy = (int8_t)mouse_packet[2];
+    int dx = (int8_t)mouse_packet[1];
+    int dy = (int8_t)mouse_packet[2];
+
+    cursor_x += dx;
+    cursor_y -= dy;
+    clamp_cursor();
+}
+
+static void process_input(void) {
+    while (inb(PORT_PS2_STATUS) & 0x01) {
+        uint8_t status = inb(PORT_PS2_STATUS);
+        uint8_t data = inb(PORT_PS2_DATA);
+
+
 static void process_input(void) {
     while (inb(PORT_PS2_STATUS) & 0x01) {
         uint8_t status = inb(PORT_PS2_STATUS);
@@ -267,6 +472,8 @@ static void process_input(void) {
             cursor_y = 8;
         }
         clamp_cursor();
+        char c = scancode_to_ascii(scancode);
+        if (c) return c;
     }
 }
 
@@ -281,5 +488,25 @@ void kmain(uint32_t multiboot_magic, uint32_t multiboot_info_addr) {
         process_input();
         render();
         io_wait();
+    render();
+
+    while (1) {
+        char key = wait_keypress();
+
+        if (key == 'w' && cursor_y > 0) {
+            --cursor_y;
+        } else if (key == 's' && cursor_y + 1 < VGA_HEIGHT) {
+            ++cursor_y;
+        } else if (key == 'a' && cursor_x > 0) {
+            --cursor_x;
+        } else if (key == 'd' && cursor_x + 1 < VGA_WIDTH) {
+            ++cursor_x;
+        } else if (key == 'q') {
+            // Quick reset position for convenience
+            cursor_x = 10;
+            cursor_y = 8;
+        }
+
+        render();
     }
 }
