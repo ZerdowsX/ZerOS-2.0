@@ -17,6 +17,9 @@ static volatile uint16_t* const vga = (uint16_t*)VGA_ADDRESS;
 
 static int32_t cursor_x = 10;
 static int32_t cursor_y = 8;
+static uint8_t mouse_cycle = 0;
+static uint8_t mouse_packet[3];
+
 static int cursor_x = 10;
 static int cursor_y = 8;
 
@@ -29,6 +32,7 @@ struct jpeg_info {
     uint8_t valid;
 };
 
+// testpaint (128x128 jpeg) placeholder blob with SOI/EOI and SOF0 size fields.
 // testpaint (128x128 jpeg) placeholder blob with valid SOI/EOI and SOF0 size fields.
 static const uint8_t testpaint[] = {
     0xFF, 0xD8,
@@ -73,6 +77,7 @@ static void draw_text(size_t x, size_t y, const char* text, uint8_t color) {
 
 static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
     struct jpeg_info info = {0, 0, 0};
+
     if (size < 4) return info;
     if (!(data[0] == 0xFF && data[1] == 0xD8)) return info;
 
@@ -88,6 +93,16 @@ static struct jpeg_info decode_jpeg_header(const uint8_t* data, size_t size) {
             ++i;
             continue;
         }
+
+        uint8_t marker = data[i + 1];
+        if (marker == 0xD9) break;
+
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            i += 2;
+            continue;
+        }
+
+        if (i + 3 >= size) break;
 
         uint8_t marker = data[i + 1];
         if (marker == 0xD9) break;
@@ -144,9 +159,8 @@ static char scancode_to_ascii(uint8_t sc) {
         [0x10] = 'q'
     };
 
-    if (sc >= 128) return 0;
-    return map[sc];
-}
+        uint16_t seg_len = (uint16_t)((data[i + 2] << 8) | data[i + 3]);
+        if (seg_len < 2 || (i + 2 + seg_len) > size) break;
 
 static char wait_keypress(void) {
     while (1) {
@@ -186,6 +200,17 @@ static void draw_testpaint_texture(void) {
     for (int32_t y = 0; y < h; ++y) {
         for (int32_t x = 0; x < w; ++x) {
 
+    const int32_t start_x = 48;
+    const int32_t start_y = 6;
+    const int32_t w = 16;
+    const int32_t h = 16;
+
+    uint8_t ok_color = COLOR(15, 1);
+    uint8_t fail_color = COLOR(15, 4);
+
+    for (int32_t y = 0; y < h; ++y) {
+        for (int32_t x = 0; x < w; ++x) {
+
     const int start_x = 48;
     const int start_y = 6;
     const int w = 16;
@@ -205,12 +230,52 @@ static void draw_testpaint_texture(void) {
         }
     }
 
+    if (info.valid && info.width == 128 && info.height == 128) {
     if (info.valid) {
         draw_text(44, 4, "testpaint JPEG 128x128", COLOR(15, 4));
     } else {
         draw_text(44, 4, "testpaint JPEG decode FAIL", COLOR(15, 4));
     }
 }
+
+static void draw_desktop(void) {
+    const uint8_t desktop_color = COLOR(15, 4);
+
+    for (size_t y = 0; y < VGA_HEIGHT; ++y) {
+        for (size_t x = 0; x < VGA_WIDTH; ++x) {
+            draw_cell(x, y, ' ', desktop_color);
+        }
+    }
+
+    // Blue texture test square
+    const uint8_t texture_color = COLOR(15, 1);
+    for (size_t y = 6; y < 14; ++y) {
+        for (size_t x = 28; x < 40; ++x) {
+            draw_cell(x, y, ' ', texture_color);
+        }
+    }
+
+    draw_text(2, 1, "ZerDOS GUI shell test", COLOR(15, 4));
+    draw_text(2, 3, "Mouse: move cursor | W/A/S/D also works", COLOR(14, 4));
+    draw_text(2, 4, "Q = reset cursor", COLOR(14, 4));
+
+    draw_testpaint_texture();
+}
+
+static void draw_cursor(void) {
+    static const uint8_t mask[3][3] = {
+        {1, 0, 0},
+        {1, 1, 0},
+        {1, 1, 1}
+    };
+
+    for (int32_t y = 0; y < 3; ++y) {
+        for (int32_t x = 0; x < 3; ++x) {
+            if (!mask[y][x]) continue;
+            int32_t px = cursor_x + x;
+            int32_t py = cursor_y + y;
+            if (px < 0 || py < 0 || px >= VGA_WIDTH || py >= VGA_HEIGHT) continue;
+            draw_cell((size_t)px, (size_t)py, (char)0xDB, COLOR(0, 15));
 
 static void draw_desktop(void) {
     const uint8_t desktop_color = COLOR(15, 4);
@@ -290,6 +355,8 @@ static char scancode_to_ascii(uint8_t sc) {
 static void clamp_cursor(void) {
     if (cursor_x < 0) cursor_x = 0;
     if (cursor_y < 0) cursor_y = 0;
+    if (cursor_x > (VGA_WIDTH - 3)) cursor_x = (VGA_WIDTH - 3);
+    if (cursor_y > (VGA_HEIGHT - 3)) cursor_y = (VGA_HEIGHT - 3);
     if (cursor_x > VGA_WIDTH - 3) cursor_x = VGA_WIDTH - 3;
     if (cursor_y > VGA_HEIGHT - 3) cursor_y = VGA_HEIGHT - 3;
 }
@@ -313,6 +380,18 @@ static uint8_t mouse_read(void) {
 }
 
 static void init_mouse(void) {
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0xA8);
+
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0x20);
+    uint8_t status = mouse_read();
+    status |= 0x02;
+    ps2_wait_write_ready();
+    outb(PORT_PS2_CMD, 0x60);
+    ps2_wait_write_ready();
+    outb(PORT_PS2_DATA, status);
+
     // Enable auxiliary device
     ps2_wait_write_ready();
     outb(PORT_PS2_CMD, 0xA8);
@@ -338,6 +417,19 @@ static void handle_mouse_byte(uint8_t b) {
     if (mouse_cycle == 0 && (b & 0x08) == 0) {
         return;
     }
+
+    mouse_packet[mouse_cycle++] = b;
+    if (mouse_cycle < 3) return;
+    mouse_cycle = 0;
+
+    int32_t dx = (int8_t)mouse_packet[1];
+    int32_t dy = (int8_t)mouse_packet[2];
+
+    cursor_x += dx;
+    cursor_y -= dy;
+    clamp_cursor();
+}
+
 
     mouse_packet[mouse_cycle++] = b;
     if (mouse_cycle < 3) return;
